@@ -53,7 +53,6 @@ Gem::Specification.new do |spec|
   # positives for new contributors, which is not a nice experience.
   spec.add_development_dependency 'rubocop', '~> 0.40.0'
 
-  spec.add_runtime_dependency 'activejob', '~> 4.2.1'
   spec.add_runtime_dependency 'mono_logger', '~> 1.0'
   spec.add_runtime_dependency 'redis', '~> 3.3'
   spec.add_runtime_dependency 'resque', '~> 1.26'
