@@ -63,6 +63,10 @@ class FakeCustomJobClassEnqueueAt
   def self.scheduled(_, _, *_); end
 end
 
+class DummyJob < ActiveJob::Base
+  queue_as :ivar
+  def perform; end
+end
 class SomeJob < ActiveJob::Base
   def perform(_repo_id, _path); end
 end
