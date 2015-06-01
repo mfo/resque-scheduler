@@ -1,6 +1,7 @@
 # vim:fileencoding=utf-8
 require 'simplecov'
-
+require 'minitest/autorun'
+require 'minitest/unit'
 require 'test/unit'
 require 'minitest'
 require 'mocha/setup'
