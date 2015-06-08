@@ -12,6 +12,13 @@ $LOAD_PATH.unshift File.dirname(File.expand_path(__FILE__)) + '/../lib'
 require 'resque-scheduler'
 require 'resque/scheduler/server'
 
+ActiveJob::Base.queue_adapter = :resque
+unless ENV['RESQUE_SCHEDULER_DISABLE_TEST_REDIS_SERVER']
+  # Start our own Redis when the tests start. RedisInstance will take care of
+  # starting and stopping.
+  require File.expand_path('../support/redis_instance', __FILE__)
+  RedisInstance.run!
+end
 ##
 # test/spec/mini 3
 # original work: http://gist.github.com/25455
@@ -58,15 +65,9 @@ class FakeCustomJobClass  < ActiveJob::Base
   def self.scheduled(_queue, _klass, *_args); end
 end
 
-<<<<<<< HEAD
-class FakeCustomJobClassEnqueueAt
-  @queue = :test
-  def self.scheduled(_, _, *_); end
-=======
 class FakeCustomJobClassEnqueueAt  < ActiveJob::Base
   queue_as :test
   def self.scheduled(_queue, _klass, *_args); end
->>>>>>> fix(delaying_extensions): update specs & implementation
 end
 
 class DummyJob < ActiveJob::Base
@@ -102,15 +103,11 @@ class SomeIvarJob < SomeJob
 end
 
 class SomeFancyJob < SomeJob
-  def self.queue
-    :fancy
-  end
+  queue_as :fancy
 end
 
 class SomeSharedEnvJob < SomeJob
-  def self.queue
-    :shared_job
-  end
+  queue_as :shared_job
 end
 
 class SomeQuickJob < SomeJob
@@ -137,7 +134,7 @@ class SomeJobWithResqueHooks < SomeRealClass
 end
 
 class JobWithParams
-  def self.perform(*args)
+  def perform(*args)
     @args = args
   end
 end
