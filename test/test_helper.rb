@@ -120,13 +120,7 @@ class SomeRealClass < ActiveJob::Base
   end
 end
 
-class SomeJobWithResqueHooks < SomeRealClass
-  def before_enqueue_example; end
-
-  def after_enqueue_example; end
-end
-
-class JobWithParams
+class JobWithParams < ActiveJob::Base
   def perform(*args)
     @args = args
   end
