@@ -222,6 +222,12 @@ module Resque
         exit if @shutdown
       end
 
+      def handle_errors
+        yield
+      rescue => e
+        log_error "#{e.class.name}: #{e.message} - #{e.backtrace.join("\n")}"
+      end
+
       # Enqueues a job based on a config hash
       def enqueue_from_config(job_config)
         args = job_config['args'] || job_config[:args]
@@ -256,6 +262,10 @@ module Resque
             job_klass.perform_later(*params)
           end
         else
+          if klass == ActiveJob::QueueAdapters::ResqueAdapter::JobWrapper && args
+            job = ActiveJob::Base.deserialize(args[0])
+            klass = job.class
+          end
           # Hack to avoid havoc for people shoving stuff into queues
           # for non-existent classes (for example: running scheduler in
           # one app that schedules for another.
@@ -267,7 +277,10 @@ module Resque
             # If the class is a custom job class, call self#scheduled on it.
             # This allows you to do things like Resque.enqueue_at(timestamp,
             # CustomJobClass). Otherwise, pass off to Resque.
-            if klass.respond_to?(:scheduled)
+            if job
+              log "About to queue ActiveJob: #{job.class}"
+              job.enqueue
+            elsif klass.respond_to?(:scheduled)
               klass.scheduled(queue, klass_name, *params)
             else
               klass.set(queue: queue).perform_later(*params)
