@@ -11,9 +11,14 @@ module Resque
       # for queueing.  Until timestamp is in the past, the job will
       # sit in the schedule list.
       def enqueue_at(timestamp, klass, *args)
-        validate(klass)
+        begin
+          queue = klass.queue_name
+        rescue NoMethodError
+          raise Resque::NoQueueError, "not valid class: #{klass}"
+        end
+        validate(klass, queue)
         enqueue_at_with_queue(
-          queue_from_class(klass), timestamp, klass, *args
+          queue, timestamp, klass, *args
         )
       end
 
@@ -22,8 +27,6 @@ module Resque
       # timestamp has passed. It respects Resque.inline option, by
       # creating the job right away instead of adding to the queue.
       def enqueue_at_with_queue(queue, timestamp, klass, *args)
-        return false unless plugin.run_before_schedule_hooks(klass, *args)
-
         if Resque.inline? || timestamp.to_i < Time.now.to_i
           # Just create the job and let resque perform it right away with
           # inline.  If the class is a custom job class, call self#scheduled
@@ -33,13 +36,11 @@ module Resque
           if klass.respond_to?(:scheduled)
             klass.scheduled(queue, klass.to_s, *args)
           else
-            Resque::Job.create(queue, klass, *args)
+            klass.set(queue: queue).perform_now(*args)
           end
         else
           delayed_push(timestamp, job_to_hash_with_queue(queue, klass, args))
         end
-
-        plugin.run_after_schedule_hooks(klass, *args)
       end
 
       # Identical to enqueue_at but takes number_of_seconds_from_now
@@ -156,7 +157,7 @@ module Resque
       # This allows for removal of delayed jobs that have arguments matching
       # certain criteria
       def remove_delayed_selection(klass = nil)
-        fail ArgumentError, 'Please supply a block' unless block_given?
+        raise ArgumentError, 'Please supply a block' unless block_given?
 
         found_jobs = find_delayed_selection(klass) { |args| yield(args) }
         found_jobs.reduce(0) do |sum, encoded_job|
@@ -169,7 +170,7 @@ module Resque
       # This allows for enqueuing of delayed jobs that have arguments matching
       # certain criteria
       def enqueue_delayed_selection(klass = nil)
-        fail ArgumentError, 'Please supply a block' unless block_given?
+        raise ArgumentError, 'Please supply a block' unless block_given?
 
         found_jobs = find_delayed_selection(klass) { |args| yield(args) }
         found_jobs.reduce(0) do |sum, encoded_job|
@@ -184,24 +185,24 @@ module Resque
       # This allows for finding of delayed jobs that have arguments matching
       # certain criteria
       def find_delayed_selection(klass = nil, &block)
-        fail ArgumentError, 'Please supply a block' unless block_given?
+        raise ArgumentError, 'Please supply a block' unless block_given?
 
-        found_jobs = []
-        start = nil
-        while start = search_first_delayed_timestamp_in_range(start, nil)
-          job = "delayed:#{start}"
-          start += 1
-          index = Resque.redis.llen(job) - 1
-          while index >= 0
-            payload = Resque.redis.lindex(job, index)
-            decoded_payload = decode(payload)
-            if payload_matches_selection?(decoded_payload, klass, &block)
-              found_jobs.push(payload)
+        timestamps = redis.zrange(:delayed_queue_schedule, 0, -1)
+
+        # Beyond 100 there's almost no improvement in speed
+        found = timestamps.each_slice(100).map do |ts_group|
+          jobs = redis.pipelined do |r|
+            ts_group.each do |ts|
+              r.lrange("delayed:#{ts}", 0, -1)
             end
-            index -= 1
+          end
+
+          jobs.flatten.select do |payload|
+            payload_matches_selection?(decode(payload), klass, &block)
           end
         end
-        found_jobs
+
+        found.flatten
       end
 
       # Given a timestamp and job (klass + args) it removes all instances and
@@ -210,6 +211,8 @@ module Resque
       # O(N) where N is the number of jobs scheduled to fire at the given
       # timestamp
       def remove_delayed_job_from_timestamp(timestamp, klass, *args)
+        return 0 if Resque.inline?
+
         key = "delayed:#{timestamp.to_i}"
         encoded_job = encode(job_to_hash(klass, args))
 
@@ -256,7 +259,7 @@ module Resque
       private
 
       def job_to_hash(klass, args)
-        { class: klass.to_s, args: args, queue: queue_from_class(klass) }
+        { class: klass.to_s, args: args, queue: klass.queue_name }
       end
 
       def job_to_hash_with_queue(queue, klass, args)
@@ -264,6 +267,8 @@ module Resque
       end
 
       def remove_delayed_job(encoded_job)
+        return 0 if Resque.inline?
+
         timestamps = redis.smembers("timestamps:#{encoded_job}")
 
         replies = redis.pipelined do

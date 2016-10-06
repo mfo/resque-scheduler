@@ -12,7 +12,7 @@ context 'DelayedQueue' do
     encoded_job = Resque.encode(
       class: SomeIvarJob.to_s,
       args: ['path'],
-      queue: Resque.queue_from_class(SomeIvarJob)
+      queue: SomeIvarJob.queue_name
     )
 
     assert_equal(0, Resque.redis.llen("delayed:#{timestamp.to_i}").to_i,
@@ -96,7 +96,7 @@ context 'DelayedQueue' do
     encoded_job = Resque.encode(
       class: SomeIvarJob.to_s,
       args: ['path'],
-      queue: Resque.queue_from_class(SomeIvarJob)
+      queue: SomeIvarJob.queue_name
     )
 
     assert_equal(0, Resque.redis.llen("delayed:#{timestamp.to_i}").to_i,
@@ -136,7 +136,7 @@ context 'DelayedQueue' do
     encoded_job = Resque.encode(
       class: SomeIvarJob.to_s,
       args: ['path'],
-      queue: Resque.queue_from_class(SomeIvarJob)
+      queue: SomeIvarJob.queue_name
     )
 
     Resque.enqueue_at(timestamp, SomeIvarJob, 'path')
@@ -226,28 +226,43 @@ context 'DelayedQueue' do
   end
 
   test 'handle_delayed_item with items' do
+    mock = Minitest::Mock.new
+    mock.expect(:perform_now, true, [])
+    mock.expect(:perform_now, true, [])
+    ActiveJob::ConfiguredJob.stubs(:new)
+                            .with(SomeIvarJob, queue: 'ivar').returns(mock).twice
+
     t = Time.now - 60 # in the past
 
     # 2 SomeIvarJob jobs should be created in the "ivar" queue
-    Resque::Job.expects(:create).twice.with(:ivar, SomeIvarJob)
     Resque.enqueue_at(t, SomeIvarJob)
     Resque.enqueue_at(t, SomeIvarJob)
+
+    Resque::Scheduler.handle_delayed_items(t)
+    mock.verify
   end
 
   test 'handle_delayed_items with items in the future' do
+    mock = Minitest::Mock.new.expect(:perform_later, true, [])
+    ActiveJob::ConfiguredJob.stubs(:new)
+                            .with(SomeIvarJob, queue: 'ivar').returns(mock).twice
+
     t = Time.now + 60 # in the future
     Resque.enqueue_at(t, SomeIvarJob)
     Resque.enqueue_at(t, SomeIvarJob)
 
-    # 2 SomeIvarJob jobs should be created in the "ivar" queue
-    Resque::Job.expects(:create).twice.with('ivar', SomeIvarJob, nil)
     Resque::Scheduler.handle_delayed_items(t)
+    mock.verify
   end
 
   test 'calls klass#scheduled when enqueuing jobs if it exists' do
     t = Time.now - 60
-    FakeCustomJobClassEnqueueAt.expects(:scheduled)
-      .once.with(:test, FakeCustomJobClassEnqueueAt.to_s, foo: 'bar')
+
+    FakeCustomJobClassEnqueueAt
+      .expects(:scheduled)
+      .once
+      .with('test', FakeCustomJobClassEnqueueAt.to_s, foo: 'bar')
+
     Resque.enqueue_at(t, FakeCustomJobClassEnqueueAt, foo: 'bar')
   end
 
@@ -257,40 +272,59 @@ context 'DelayedQueue' do
     begin
       Resque.inline = true
       t = Time.now - 60
-      FakeCustomJobClassEnqueueAt.expects(:scheduled)
-        .once.with(:test, FakeCustomJobClassEnqueueAt.to_s, foo: 'bar')
+      FakeCustomJobClassEnqueueAt
+        .expects(:scheduled)
+        .once
+        .with('test', FakeCustomJobClassEnqueueAt.to_s, foo: 'bar')
+
       Resque.enqueue_at(t, FakeCustomJobClassEnqueueAt, foo: 'bar')
     ensure
       Resque.inline = old_val
     end
   end
 
-  test 'enqueue_delayed_items_for_timestamp creates jobs ' \
-       'and empties the delayed queue' do
+  test 'enqueue_next_item picks one job' do
     t = Time.now + 60
 
     Resque.enqueue_at(t, SomeIvarJob)
     Resque.enqueue_at(t, SomeIvarJob)
+    Resque::Scheduler.enqueue_next_item(t)
+    assert_equal(1, Resque.delayed_timestamp_peek(t, 0, 3).length)
+  end
 
+  test 'enqueue_delayed_items_for_timestamp creates jobs ' \
+       'and empties the delayed queue' do
     # 2 SomeIvarJob jobs should be created in the "ivar" queue
-    Resque::Job.expects(:create).twice.with('ivar', SomeIvarJob, nil)
+    mock = Minitest::Mock.new
+    mock.expect(:perform_later, true, [])
+    mock.expect(:perform_later, true, [])
+    ActiveJob::ConfiguredJob.stubs(:new)
+                            .with(SomeIvarJob, queue: 'ivar').returns(mock).twice
+
+    t = Time.now + 60
+
+    Resque.enqueue_at(t, SomeIvarJob)
+    Resque.enqueue_at(t, SomeIvarJob)
 
     Resque::Scheduler.enqueue_delayed_items_for_timestamp(t)
 
     # delayed queue for timestamp should be empty
     assert_equal(0, Resque.delayed_timestamp_peek(t, 0, 3).length)
+    mock.verify
   end
 
   test 'enqueue_delayed creates jobs and empties the delayed queue' do
     t = Time.now + 60
+    mock = Minitest::Mock.new
+    mock.expect(:perform_later, true, ['bar'])
+    mock.expect(:perform_later, true, ['bar'])
+
+    ActiveJob::ConfiguredJob.stubs(:new)
+                            .with(SomeIvarJob, queue: 'ivar').returns(mock)
 
     Resque.enqueue_at(t, SomeIvarJob, 'foo')
     Resque.enqueue_at(t, SomeIvarJob, 'bar')
     Resque.enqueue_at(t, SomeIvarJob, 'bar')
-
-    # 3 SomeIvarJob jobs should be created in the "ivar" queue
-    Resque::Job.expects(:create).never.with(:ivar, SomeIvarJob, 'foo')
-    Resque::Job.expects(:create).twice.with(:ivar, SomeIvarJob, 'bar')
 
     # 2 SomeIvarJob jobs should be enqueued
     assert_equal(2, Resque.enqueue_delayed(SomeIvarJob, 'bar'))
@@ -301,15 +335,19 @@ context 'DelayedQueue' do
 
   test 'handle_delayed_items works with out specifying queue ' \
        '(upgrade case)' do
+    mock = Minitest::Mock.new.expect(:perform_later, true, [])
+    ActiveJob::ConfiguredJob.stubs(:new)
+                            .with(SomeIvarJob, queue: 'ivar').returns(mock)
+
     t = Time.now - 60
     Resque.delayed_push(t, class: 'SomeIvarJob')
 
     # Since we didn't specify :queue when calling delayed_push, it will be
     # forced to load the class to figure out the queue.  This is the upgrade
     # case from 1.0.4 to 1.0.5.
-    Resque::Job.expects(:create).once.with(:ivar, SomeIvarJob, nil)
 
     Resque::Scheduler.handle_delayed_items
+    mock.verify
   end
 
   test 'reset_delayed_queue clears the queue' do
@@ -327,12 +365,26 @@ context 'DelayedQueue' do
     encoded_job = Resque.encode(
       class: SomeIvarJob.to_s,
       args: [],
-      queue: Resque.queue_from_class(SomeIvarJob)
+      queue: SomeIvarJob.queue_name
     )
     Resque.enqueue_at(t, SomeIvarJob)
 
     assert_equal(1, Resque.remove_delayed(SomeIvarJob))
     assert_equal(0, Resque.redis.scard("timestamps:#{encoded_job}"))
+  end
+
+  test "when Resque.inline = true, remove_delayed doesn't remove the job" \
+       'and returns 0' do
+    begin
+      Resque.inline = true
+
+      timestamp = Time.now + 120
+      Resque.enqueue_at(timestamp, SomeIvarJob, 'foo', 'bar')
+
+      assert_equal(0, Resque.remove_delayed(SomeIvarJob))
+    ensure
+      Resque.inline = false
+    end
   end
 
   test 'scheduled_at returns an array containing job schedule time' do
@@ -533,10 +585,10 @@ context 'DelayedQueue' do
 
   test 'enqueue_delayed_selection enqueues single item matching arguments' do
     t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t + 1, SomeIvarJob, 'bar')
-    Resque.enqueue_at(t + 2, SomeIvarJob, 'bar')
-    Resque.enqueue_at(t + 3, SomeIvarJob, 'baz')
+    Resque.enqueue_at(t, SomeIvarJob, 'foo', 'bar')
+    Resque.enqueue_at(t + 1, SomeIvarJob, 'bar', 'baz')
+    Resque.enqueue_at(t + 2, SomeIvarJob, 'bar', 'foo')
+    Resque.enqueue_at(t + 3, SomeIvarJob, 'baz', 'foo')
 
     assert_equal(1, Resque.enqueue_delayed_selection { |a| a.first == 'foo' })
     assert_equal(3, Resque.count_all_scheduled_jobs)
@@ -544,25 +596,29 @@ context 'DelayedQueue' do
 
   test 'enqueue_delayed_selection enqueues multiple items matching arguments' do
     t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t + 1, SomeIvarJob, 'bar')
-    Resque.enqueue_at(t + 2, SomeIvarJob, 'bar')
-    Resque.enqueue_at(t + 3, SomeIvarJob, 'baz')
+    Resque.enqueue_at(t, SomeIvarJob, 'foo', 'bar')
+    Resque.enqueue_at(t + 1, SomeIvarJob, 'bar', 'foo')
+    Resque.enqueue_at(t + 2, SomeIvarJob, 'bar', 'foo')
+    Resque.enqueue_at(t + 3, SomeIvarJob, 'baz', 'bar')
 
-    assert_equal(2, Resque.enqueue_delayed_selection { |a| a.first == 'bar' })
+    assert_equal(2, Resque.enqueue_delayed_selection do  |a|
+      a.first == 'bar' && a.second == 'foo'
+    end)
     assert_equal(2, Resque.count_all_scheduled_jobs)
   end
 
   test 'enqueue_delayed_selection enqueues multiple items matching ' \
        'arguments as hash' do
     t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, foo: 'foo')
-    Resque.enqueue_at(t + 1, SomeIvarJob, foo: 'bar')
-    Resque.enqueue_at(t + 2, SomeIvarJob, foo: 'bar')
-    Resque.enqueue_at(t + 3, SomeIvarJob, foo: 'baz')
+    Resque.enqueue_at(t, SomeIvarJob, {foo: 'foo'}, {bar: 'foo'})
+    Resque.enqueue_at(t + 1, SomeIvarJob, {foo: 'bar'}, {bar: 'baz'})
+    Resque.enqueue_at(t + 2, SomeIvarJob, {foo: 'bar'}, {bar: 'baz'})
+    Resque.enqueue_at(t + 3, SomeIvarJob, {foo: 'baz'}, {bar: 'bar'})
 
     assert_equal(
-        2, Resque.enqueue_delayed_selection { |a| a.first['foo'] == 'bar' }
+      2, Resque.enqueue_delayed_selection do
+        |a| a.first['foo'] == 'bar' && a.second['bar'] == 'baz'
+      end
     )
     assert_equal(2, Resque.count_all_scheduled_jobs)
   end
@@ -600,33 +656,22 @@ context 'DelayedQueue' do
 
   test 'enqueue_delayed_selection enqueues item by class' do
     t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t, SomeQuickJob, 'foo')
+    Resque.enqueue_at(t, SomeIvarJob, 'foo', 'bar')
+    Resque.enqueue_at(t, SomeQuickJob, 'foo', 'bar')
 
     assert_equal(1, Resque.enqueue_delayed_selection(SomeIvarJob) do |a|
-      a.first == 'foo'
+      a.first == 'foo' && a.second == 'bar'
     end)
     assert_equal(1, Resque.count_all_scheduled_jobs)
   end
 
   test 'enqueue_delayed_selection enqueues item by class name as a string' do
     t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t, SomeQuickJob, 'foo')
+    Resque.enqueue_at(t, SomeIvarJob, 'foo', 'bar')
+    Resque.enqueue_at(t, SomeQuickJob, 'foo', 'bar')
 
     assert_equal(1, Resque.enqueue_delayed_selection('SomeIvarJob') do |a|
-      a.first == 'foo'
-    end)
-    assert_equal(1, Resque.count_all_scheduled_jobs)
-  end
-
-  test 'enqueue_delayed_selection enqueues item by class name as a symbol' do
-    t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t, SomeQuickJob, 'foo')
-
-    assert_equal(1, Resque.enqueue_delayed_selection(:SomeIvarJob) do |a|
-      a.first == 'foo'
+      a.first == 'foo' && a.second == 'bar'
     end)
     assert_equal(1, Resque.count_all_scheduled_jobs)
   end
@@ -634,29 +679,17 @@ context 'DelayedQueue' do
   test 'enqueue_delayed_selection enqueues items only from' \
        'matching job class' do
     t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t, SomeQuickJob, 'foo')
-    Resque.enqueue_at(t + 1, SomeIvarJob, 'bar')
-    Resque.enqueue_at(t + 1, SomeQuickJob, 'bar')
-    Resque.enqueue_at(t + 1, SomeIvarJob, 'foo')
-    Resque.enqueue_at(t + 2, SomeQuickJob, 'foo')
+    Resque.enqueue_at(t, SomeIvarJob, 'foo', 'bar')
+    Resque.enqueue_at(t, SomeQuickJob, 'foo', 'bar')
+    Resque.enqueue_at(t + 1, SomeIvarJob, 'bar', 'foo')
+    Resque.enqueue_at(t + 1, SomeQuickJob, 'bar', 'foo')
+    Resque.enqueue_at(t + 1, SomeIvarJob, 'foo', 'bar')
+    Resque.enqueue_at(t + 2, SomeQuickJob, 'foo', 'bar')
 
     assert_equal(2, Resque.enqueue_delayed_selection(SomeIvarJob) do |a|
-      a.first == 'foo'
+      a.first == 'foo' && a.second == 'bar'
     end)
     assert_equal(4, Resque.count_all_scheduled_jobs)
-  end
-
-  test 'enqueue_delayed_selection enqueues items from matching job class ' \
-       'without params' do
-    t = Time.now + 120
-    Resque.enqueue_at(t, SomeIvarJob)
-    Resque.enqueue_at(t + 1, SomeQuickJob)
-    Resque.enqueue_at(t + 2, SomeIvarJob)
-    Resque.enqueue_at(t + 3, SomeQuickJob)
-
-    assert_equal(2, Resque.enqueue_delayed_selection(SomeQuickJob) { true })
-    assert_equal(2, Resque.count_all_scheduled_jobs)
   end
 
   test 'find_delayed_selection finds multiple items matching ' \
@@ -707,11 +740,8 @@ context 'DelayedQueue' do
     Resque.enqueue_at(t + 2, SomeIvarJob, foo: 'bar')
     Resque.enqueue_at(t + 3, SomeIvarJob, foo: 'baz')
 
-    assert_equal(
-        2, (Resque.find_delayed_selection do |a|
-          a.first['foo'] == 'bar'
-        end).length
-    )
+    len = Resque.find_delayed_selection { |a| a.first['foo'] == 'bar' }.length
+    assert_equal(2, len)
   end
 
   test 'find_delayed_selection ignores jobs with no arguments' do
@@ -792,7 +822,7 @@ context 'DelayedQueue' do
     Resque.enqueue_at(t + 3, SomeQuickJob)
 
     assert_equal(
-        2, (Resque.find_delayed_selection(SomeQuickJob) { true }).length
+      2, (Resque.find_delayed_selection(SomeQuickJob) { true }).length
     )
   end
 
@@ -817,6 +847,20 @@ context 'DelayedQueue' do
     )
     assert_equal 1, Resque.delayed_timestamp_size(t1)
     assert_equal 0, Resque.delayed_timestamp_size(t2)
+  end
+
+  test 'when Resque.inline = true, remove_delayed_job_from_timestamp' \
+       "doesn't remove any jobs and returns 0" do
+    begin
+      Resque.inline = true
+
+      timestamp = Time.now + 120
+      Resque.enqueue_at(timestamp, SomeIvarJob, 'foo', 'bar')
+
+      assert_equal(0, Resque.delayed_timestamp_size(timestamp))
+    ensure
+      Resque.inline = false
+    end
   end
 
   test 'remove_delayed_job_from_timestamp removes nothing if there ' \
@@ -866,14 +910,17 @@ context 'DelayedQueue' do
 
   test 'inlining jobs with Resque.inline config' do
     begin
-      Resque.inline = true
-      Resque::Job.expects(:create).once.with(:ivar, SomeIvarJob, 'foo', 'bar')
+      mock = Minitest::Mock.new.expect(:perform_now, true, %w(foo bar))
+      ActiveJob::ConfiguredJob.stubs(:new)
+                              .with(SomeIvarJob, queue: 'ivar').returns(mock).once
 
+      Resque.inline = true
       timestamp = Time.now + 120
       Resque.enqueue_at(timestamp, SomeIvarJob, 'foo', 'bar')
 
       assert_equal 0, Resque.count_all_scheduled_jobs
       assert !Resque.redis.exists("delayed:#{timestamp.to_i}")
+      mock.verify
     ensure
       Resque.inline = false
     end

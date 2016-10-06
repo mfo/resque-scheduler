@@ -2,7 +2,39 @@
 require_relative 'test_helper'
 
 require 'resque/server/test_helper'
-
+def setup_schedule
+  Resque::Scheduler.env = 'production'
+  Resque.schedule = {
+    'some_ivar_job' => {
+      'cron' => '* * * * *',
+      'class' => 'SomeIvarJob',
+      'args' => ['/tmp', '/tmp'],
+      'rails_env' => 'production'
+    },
+    'some_other_job' => {
+      'every' => ['1m', ['1h']],
+      'queue' => 'high',
+      'custom_job_class' => 'SomeOtherJob',
+      'args' => {
+        'b' => 'blah'
+      }
+    },
+    'some_fancy_job' => {
+      'every' => ['1m'],
+      'queue' => 'fancy',
+      'class' => 'SomeFancyJob',
+      'args' => %w(sparkles sparkles),
+      'rails_env' => 'fancy'
+    },
+    'shared_env_job' => {
+      'cron' => '* * * * *',
+      'class' => 'SomeSharedEnvJob',
+      'args' => ['/tmp', '/tmp'],
+      'rails_env' => 'fancy, production'
+    }
+  }
+  Resque::Scheduler.load_schedule!
+end
 context 'on GET to /schedule' do
   setup { get '/schedule' }
 
@@ -11,37 +43,7 @@ end
 
 context 'on GET to /schedule with scheduled jobs' do
   setup do
-    Resque::Scheduler.env = 'production'
-    Resque.schedule = {
-      'some_ivar_job' => {
-        'cron' => '* * * * *',
-        'class' => 'SomeIvarJob',
-        'args' => '/tmp',
-        'rails_env' => 'production'
-      },
-      'some_other_job' => {
-        'every' => ['1m', ['1h']],
-        'queue' => 'high',
-        'custom_job_class' => 'SomeOtherJob',
-        'args' => {
-          'b' => 'blah'
-        }
-      },
-      'some_fancy_job' => {
-        'every' => ['1m'],
-        'queue' => 'fancy',
-        'class' => 'SomeFancyJob',
-        'args' => 'sparkles',
-        'rails_env' => 'fancy'
-      },
-      'shared_env_job' => {
-        'cron' => '* * * * *',
-        'class' => 'SomeSharedEnvJob',
-        'args' => '/tmp',
-        'rails_env' => 'fancy, production'
-      }
-    }
-    Resque::Scheduler.load_schedule!
+    setup_schedule
     get '/schedule'
   end
 
@@ -51,8 +53,8 @@ context 'on GET to /schedule with scheduled jobs' do
     assert last_response.body.include?('SomeIvarJob')
   end
 
-  test 'excludes jobs for other envs' do
-    assert !last_response.body.include?('SomeFancyJob')
+  test 'include(highlight) jobs for other envs' do
+    assert last_response.body.include?('SomeFancyJob')
   end
 
   test 'includes job used in multiple environments' do
@@ -75,12 +77,15 @@ context 'on GET to /schedule with scheduled jobs' do
 end
 
 context 'on GET to /delayed' do
-  setup { get '/delayed' }
+  setup do
+    setup_schedule
+    get '/delayed'
+  end
 
   test('is 200') { assert last_response.ok? }
 end
 
-context 'on GET to /delayed/jobs/:klass'do
+context 'on GET to /delayed/jobs/:klass' do
   setup do
     @t = Time.now + 3600
     Resque.enqueue_at(@t, SomeIvarJob, 'foo', 'bar')
@@ -100,10 +105,8 @@ context 'on GET to /delayed/jobs/:klass'do
     setup do
       @t = Time.now + 3600
       module Foo
-        class Bar
-          def self.queue
-            'bar'
-          end
+        class Bar < ActiveJob::Base
+          queue_as :bar
         end
       end
       Resque.enqueue_at(@t, Foo::Bar, 'foo', 'bar')
@@ -144,7 +147,7 @@ module Test
         }
       }
     }
-  }
+  }.freeze
 end
 
 context 'POST /schedule/requeue' do
@@ -157,7 +160,7 @@ context 'POST /schedule/requeue' do
     # Regular jobs without params should redirect to /overview
     job_name = 'job_without_params'
     Resque::Scheduler.stubs(:enqueue_from_config)
-      .once.with(Resque.schedule[job_name])
+                     .once.with(Resque.schedule[job_name])
 
     post '/schedule/requeue', 'job_name' => job_name
     follow_redirect!
@@ -220,34 +223,87 @@ end
 context 'on POST to /delayed/search' do
   setup do
     t = Time.now + 60
-    Resque.enqueue_at(t, SomeIvarJob)
-    Resque.enqueue(SomeQuickJob)
+    SomeIvarJob.set(wait_until: t).perform_later('a', 'b')
+    SomeQuickJob.perform_later
+    setup_schedule
   end
 
   test 'should find matching scheduled job' do
     post '/delayed/search', 'search' => 'ivar'
-    assert last_response.status == 200
+
+    assert last_response.status == 200, "expected 200 status, \
+                                        got #{last_response.status}"
     assert last_response.body.include?('SomeIvarJob')
+  end
+
+  test 'the form should encode string params' do
+    post '/delayed/search', 'search' => 'ivar'
+    assert_match('value="[&quot;string arg&quot;]', last_response.body)
   end
 
   test 'should find matching queued job' do
     post '/delayed/search', 'search' => 'quick'
-    assert last_response.status == 200
+
+    assert last_response.status == 200, "expected 200 status, \
+                                        got #{last_response.status}"
     assert last_response.body.include?('SomeQuickJob')
   end
 end
 
 context 'on POST to /delayed/cancel_now' do
-  setup { post '/delayed/cancel_now' }
+  setup do
+    t = Time.now + 60
+    SomeIvarJob.set(wait_until: t).perform_later('a', 'b')
+    params = {
+      'klass'     => 'SomeIvarJob',
+      'timestamp' => t,
+      'args'      => Resque.encode(%w(a b))
+    }
+    post '/delayed/cancel_now', params
+    # =======
+    #     Resque.reset_delayed_queue
+    #     Resque.enqueue_at(Time.now + 10, SomeIvarJob, 'arg')
+    #     Resque.enqueue_at(Time.now + 100, SomeQuickJob)
+    #   end
+
+    #   test 'removes the specified job' do
+    #     job_timestamp, *remaining = Resque.delayed_queue_peek(0, 10)
+    #     assert_equal 1, remaining.size
+
+    #     post '/delayed/cancel_now',
+    #          'timestamp' => job_timestamp,
+    #          'klass'     => SomeIvarJob.name,
+    #          'args'      => Resque.encode(['arg'])
+
+    #     assert_equal 302, last_response.status
+    #     assert_equal remaining, Resque.delayed_queue_peek(0, 10)
+    #   end
+
+    #   test 'does not remove the job if the params do not match' do
+    #     timestamps = Resque.delayed_queue_peek(0, 10)
+
+    #     post '/delayed/cancel_now',
+    #          'timestamp' => timestamps.first,
+    #          'klass'     => SomeIvarJob.name
+
+    #     assert_equal 302, last_response.status
+    #     assert_equal timestamps, Resque.delayed_queue_peek(0, 10)
+    # >>>>>>> master
+  end
 
   test 'redirects to overview' do
+    post '/delayed/cancel_now'
+
     assert last_response.status == 302
     assert last_response.header['Location'].include? '/delayed'
   end
 end
 
 context 'on POST to /delayed/clear' do
-  setup { post '/delayed/clear' }
+  setup do
+    setup_schedule
+    post '/delayed/clear'
+  end
 
   test 'redirects to delayed' do
     assert last_response.status == 302
@@ -256,11 +312,10 @@ context 'on POST to /delayed/clear' do
 end
 
 context 'on POST to /delayed/queue_now' do
-  setup { post '/delayed/queue_now' }
+  setup { post '/delayed/queue_now', timestamp: 0 }
 
-  test 'redirects to overview' do
-    assert last_response.status == 302
-    assert last_response.header['Location'].include? '/overview'
+  test 'returns ok status' do
+    assert last_response.status == 200
   end
 end
 

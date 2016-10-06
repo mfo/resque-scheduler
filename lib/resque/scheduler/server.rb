@@ -1,12 +1,15 @@
 # vim:fileencoding=utf-8
 require 'resque-scheduler'
 require 'resque/server'
+require 'tilt/erb'
 require 'json'
 
 # Extend Resque::Server to add tabs
 module Resque
   module Scheduler
     module Server
+      TIMESTAMP_FORMAT = '%Y-%m-%d %H:%M:%S %z'.freeze
+
       unless defined?(::Resque::Scheduler::Server::VIEW_PATH)
         VIEW_PATH = File.join(File.dirname(__FILE__), 'server', 'views')
       end
@@ -104,10 +107,19 @@ module Resque
 
         def delayed_queue_now
           timestamp = params['timestamp'].to_i
+          formatted_time = Time.at(timestamp).strftime(
+            ::Resque::Scheduler::Server::TIMESTAMP_FORMAT
+          )
+
           if timestamp > 0
-            Resque::Scheduler.enqueue_delayed_items_for_timestamp(timestamp)
+            unless Resque::Scheduler.enqueue_next_item(timestamp)
+              @error_message = "Unable to remove item at #{formatted_time}"
+            end
+          else
+            @error_message = "Incorrect timestamp #{formatted_time}"
           end
-          redirect u('/overview')
+
+          erb scheduler_template('delayed')
         end
 
         def delayed_cancel_now
@@ -126,13 +138,48 @@ module Resque
 
       module HelperMethods
         def format_time(t)
-          t.strftime('%Y-%m-%d %H:%M:%S %z')
+          t.strftime(::Resque::Scheduler::Server::TIMESTAMP_FORMAT)
+        end
+
+        def show_job_arguments(args)
+          Array(args).map(&:inspect).join("\n")
         end
 
         def queue_from_class_name(class_name)
-          Resque.queue_from_class(
-            Resque::Scheduler::Util.constantize(class_name)
-          )
+          Resque::Scheduler::Util.constantize(class_name).queue_name
+        end
+
+        # given an active_job_wrapper {
+        #   "class"=>"ActiveJob::QueueAdapters::ResqueAdapter::JobWrapper",
+        #   "args"=>[
+        #     {
+        #       "job_class"=>"SomeQuickJob",
+        #       "job_id"=>"2b031483-09f6-45bc-98ea-cc15059fb464",
+        #       "queue_name"=>"quick",
+        #       "arguments"=>[]
+        #     }
+        #   ]
+        # }
+        # returns {
+        #   "job_class"=>"SomeQuickJob",
+        #   "job_id"=>"2b031483-09f6-45bc-98ea-cc15059fb464",
+        #   "queue_name"=>"quick",
+        #   "arguments"=>[]
+        # }
+        def deserialize_active_job(active_job_wrapper)
+          active_job_wrapper['args'].first
+        end
+
+        # given an active_job_wrapper {
+        # returns a mix of active_job/resque to ui compat
+        def serialize_as_resque_job(active_job_wrapper)
+          aj = deserialize_active_job(active_job_wrapper)
+
+          {
+            'queue' => aj['queue_name'],
+            'args'  => aj['arguments'],
+            'class' => aj['job_class']
+          }.merge!(active_job_wrapper)
         end
 
         def find_job(worker)
@@ -141,20 +188,22 @@ module Resque
 
           dels = delayed_jobs_for_worker(worker)
           results += dels.select do |j|
-            j['class'].downcase.include?(worker) &&
-            j.merge!('where_at' => 'delayed')
+            aj = deserialize_active_job(j)
+            aj['job_class'].downcase.include?(worker) &&
+              j.merge!('where_at' => 'delayed')
           end
 
           Resque.queues.each do |queue|
             queued = Resque.peek(queue, 0, Resque.size(queue))
             queued = [queued] unless queued.is_a?(Array)
             results += queued.select do |j|
-              j['class'].downcase.include?(worker) &&
-              j.merge!('queue' => queue, 'where_at' => 'queued')
+              aj = deserialize_active_job(j)
+              aj['job_class'].downcase.include?(worker) &&
+                j.merge!('queue' => queue, 'where_at' => 'queued')
             end
           end
 
-          results
+          results.map { |j| serialize_as_resque_job(j) }
         end
 
         def schedule_interval(config)
@@ -175,7 +224,7 @@ module Resque
 
           s << ' ('
           meta = every.last.map do |key, value|
-            "#{key.to_s.gsub(/_/, ' ')} #{value}"
+            "#{key.to_s.tr('_', ' ')} #{value}"
           end
           s << meta.join(', ') << ')'
         end
@@ -195,12 +244,12 @@ module Resque
         end
 
         def scheduled_in_this_env?(name)
-          return true if Resque.schedule[name]['rails_env'].nil?
+          return true if rails_env(name).nil?
           rails_env(name).split(/[\s,]+/).include?(Resque::Scheduler.env)
         end
 
         def rails_env(name)
-          Resque.schedule[name]['rails_env']
+          Resque.schedule[name]['rails_env'] || Resque.schedule[name]['env']
         end
 
         def scheduler_view(filename, options = {}, locals = {})
@@ -215,7 +264,7 @@ module Resque
             working = [*Resque.working]
             work = working.select do |w|
               w.job && w.job['payload'] &&
-              w.job['payload']['class'].downcase.include?(worker)
+                w.job['payload']['class'].downcase.include?(worker)
             end
             work.each do |w|
               results += [
@@ -232,9 +281,10 @@ module Resque
             schedule_size = Resque.delayed_queue_schedule_size
             Resque.delayed_queue_peek(0, schedule_size).each do |d|
               Resque.delayed_timestamp_peek(
-                d, 0, Resque.delayed_timestamp_size(d)).each do |j|
-                  dels << j.merge!('timestamp' => d)
-                end
+                d, 0, Resque.delayed_timestamp_size(d)
+              ).each do |j|
+                dels << j.merge!('timestamp' => d)
+              end
             end
           end
         end
