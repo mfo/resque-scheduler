@@ -40,9 +40,9 @@ Gem::Specification.new do |spec|
   # positives for new contributors, which is not a nice experience.
   spec.add_development_dependency 'rubocop', '~> 0.40.0'
 
-  spec.add_runtime_dependency 'activejob', '~> 4.2.1'
-  spec.add_runtime_dependency 'mono_logger', '~> 1.0'
-  spec.add_runtime_dependency 'redis', '~> 3.3'
-  spec.add_runtime_dependency 'resque', '~> 1.26'
-  spec.add_runtime_dependency 'rufus-scheduler', '~> 3.2'
+  spec.add_runtime_dependency 'activejob'
+  spec.add_runtime_dependency 'mono_logger'
+  spec.add_runtime_dependency 'redis'
+  spec.add_runtime_dependency 'resque'
+  spec.add_runtime_dependency 'rufus-scheduler'
 end
