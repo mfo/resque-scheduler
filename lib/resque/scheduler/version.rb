@@ -2,6 +2,6 @@
 
 module Resque
   module Scheduler
-    VERSION = '5.0.0'.freeze
+    VERSION = '5.0.2'.freeze
   end
 end
