@@ -13,12 +13,6 @@ require 'resque-scheduler'
 require 'resque/scheduler/server'
 
 ActiveJob::Base.queue_adapter = :resque
-unless ENV['RESQUE_SCHEDULER_DISABLE_TEST_REDIS_SERVER']
-  # Start our own Redis when the tests start. RedisInstance will take care of
-  # starting and stopping.
-  require File.expand_path('../support/redis_instance', __FILE__)
-  RedisInstance.run!
-end
 ##
 # test/spec/mini 3
 # original work: http://gist.github.com/25455
@@ -117,6 +111,16 @@ end
 class SomeRealClass < ActiveJob::Base
   queue_as :some_real_queue
   def perform(_argv)
+  end
+end
+
+class SomeRealClassWithScheduleHooks < ActiveJob::Base
+  queue_as :some_real_queue
+  def perform(_argv)
+  end
+  def before_schedule_example(*args)
+  end
+  def after_schedule_example(*args)
   end
 end
 

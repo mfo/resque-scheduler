@@ -8,6 +8,12 @@ module Resque
       end
 
       def self.run_hooks(job, pattern, *args)
+        if job == ActiveJob::QueueAdapters::ResqueAdapter::JobWrapper
+          job_config = args[0]
+          job_class = job_config["job_class"]
+          job = Resque::Scheduler::Util.constantize(job)
+        end
+
         results = hooks(job, pattern).map do |hook|
           job.send(hook, *args)
         end
@@ -18,6 +24,15 @@ module Resque
       def self.run_before_delayed_enqueue_hooks(klass, *args)
         run_hooks(klass, 'before_delayed_enqueue', *args)
       end
+
+      def self.run_before_schedule_hooks(klass, *args)
+        run_hooks(klass, 'before_schedule', *args)
+      end
+
+      def self.run_after_schedule_hooks(klass, *args)
+        run_hooks(klass, 'after_schedule', *args)
+      end
+
     end
   end
 end

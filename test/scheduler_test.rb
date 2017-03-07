@@ -32,11 +32,14 @@ context 'Resque::Scheduler' do
   end
 
   test 'enqueue runs hooks' do
-    SomeRealClass.expects(:before_delayed_enqueue_example).with('/tmp')
+    class SomeRealClassWithActiveJobHooks < ActiveJob::Base
+      queue_as 'some_real_queue'
 
-    class SomeRealClass < ActiveJob::Base
       MOCK_BEFORE_ENQUEUE = Minitest::Mock.new.expect(:run, true)
       MOCK_AFTER_ENQUEUE = Minitest::Mock.new.expect(:run, true)
+
+      def perform(*)
+      end
 
       before_enqueue do
         MOCK_BEFORE_ENQUEUE.run
@@ -46,18 +49,22 @@ context 'Resque::Scheduler' do
         MOCK_AFTER_ENQUEUE.run
       end
     end
+
+    SomeRealClassWithActiveJobHooks.expects(:before_delayed_enqueue_example).with('/tmp')
+
     ActiveJob::ConfiguredJob.stubs(:new)
-      .with(SomeRealClass, queue: 'some_real_queue').returns(SomeRealClass)
+      .with(SomeRealClassWithActiveJobHooks, queue: 'some_real_queue')
+      .returns(SomeRealClassWithActiveJobHooks)
 
     config = {
       'cron' => '* * * * *',
-      'class' => 'SomeJobWithResqueHooks',
+      'class' => 'SomeRealClassWithActiveJobHooks',
       'args' => '/tmp'
     }
     Resque::Scheduler.enqueue_from_config(config)
     [
-      SomeRealClass::MOCK_BEFORE_ENQUEUE,
-      SomeRealClass::MOCK_AFTER_ENQUEUE
+      SomeRealClassWithActiveJobHooks::MOCK_BEFORE_ENQUEUE,
+      SomeRealClassWithActiveJobHooks::MOCK_AFTER_ENQUEUE
     ].map(&:verify)
   end
 
@@ -482,33 +489,30 @@ context 'Resque::Scheduler' do
            'this behaviour is best tested using forks')
     end
 
-    class BeforeEnqueueJob
-      @queue = :quick
+    class BeforeEnqueueJob < ActiveJob::Base
+      queue_as :quick
+
+      def perform(*args)
+      end
+
+      before_enqueue do |job|
+        return false if job.class.enqueue_started?
+        job.class.enqueue_started!
+
+        sleep 5
+        true
+      end
 
       class << self
-        def before_enqueue_example(*)
-          return false if enqueue_started?
-          enqueue_started!
-
-          sleep 5
-          true
-        end
-
         def enqueue_started?
           Resque.redis.get('before_enqueue_job:enqueued') == 'true'
         end
-
-        def perform(*)
-        end
-
-        private
 
         def enqueue_started!
           Resque.redis.set('before_enqueue_job:enqueued', 'true')
         end
       end
     end
-
     schedule = {
       'BeforeEnqueueJob' => { cron: '* * * * * *', class: 'BeforeEnqueueJob' }
     }
@@ -520,8 +524,9 @@ context 'Resque::Scheduler' do
     end
 
     begin
-      30.times do
-        break if BeforeEnqueueJob.enqueue_started?
+      30.times do |i|
+        had_been_queued = BeforeEnqueueJob.enqueue_started?
+        break if had_been_queued
         sleep 0.1
       end
     ensure
